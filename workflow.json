@@ -1,0 +1,154 @@
+{
+  "name": "WhatsApp AI Customer Support",
+  "nodes": [
+    {
+      "name": "Webhook - WA Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "position": [240, 300],
+      "parameters": {
+        "path": "wa-support",
+        "httpMethod": "POST",
+        "responseMode": "responseNode"
+      }
+    },
+    {
+      "name": "IF - Is Text Message",
+      "type": "n8n-nodes-base.if",
+      "position": [460, 300],
+      "parameters": {
+        "conditions": {
+          "string": [{
+            "value1": "={{ $json.entry[0].changes[0].value.messages[0].type }}",
+            "operation": "equals",
+            "value2": "text"
+          }]
+        }
+      }
+    },
+    {
+      "name": "Set Variables",
+      "type": "n8n-nodes-base.set",
+      "position": [680, 300],
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "fromNumber", "value": "={{ $json.entry[0].changes[0].value.messages[0].from }}" },
+            { "name": "userMessage", "value": "={{ $json.entry[0].changes[0].value.messages[0].text.body }}" },
+            { "name": "timestamp", "value": "={{ $now.toISO() }}" },
+            { "name": "systemPrompt", "value": "Kamu adalah customer support AI. [Isi prompt kamu di sini]. Jika tidak bisa menjawab, balas: ESCALATE: [alasan]" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "HTTP - Claude API",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [900, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "model", "value": "claude-sonnet-4-20250514" },
+            { "name": "max_tokens", "value": 1024 },
+            { "name": "system", "value": "={{ $node['Set Variables'].json.systemPrompt }}" },
+            { "name": "messages", "value": "=[{\"role\":\"user\",\"content\":\"{{ $node['Set Variables'].json.userMessage }}\"}]" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "IF - Escalate?",
+      "type": "n8n-nodes-base.if",
+      "position": [1120, 300],
+      "parameters": {
+        "conditions": {
+          "string": [{
+            "value1": "={{ $json.content[0].text }}",
+            "operation": "contains",
+            "value2": "ESCALATE"
+          }]
+        }
+      }
+    },
+    {
+      "name": "HTTP - Reply WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [1340, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v19.0/{{ $env.PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.WHATSAPP_TOKEN }}" }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "messaging_product", "value": "whatsapp" },
+            { "name": "to", "value": "={{ $node['Set Variables'].json.fromNumber }}" },
+            { "name": "type", "value": "text" },
+            { "name": "text", "value": "={\"body\":\"{{ $node['HTTP - Claude API'].json.content[0].text }}\"}" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "HTTP - Slack Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [1340, 400],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "text", "value": "=:warning: *Escalation needed!*\nFrom: {{ $node['Set Variables'].json.fromNumber }}\nMessage: {{ $node['Set Variables'].json.userMessage }}\nReason: {{ $node['HTTP - Claude API'].json.content[0].text }}" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Google Sheets - Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "position": [1560, 300],
+      "parameters": {
+        "operation": "append",
+        "sheetId": "={{ $env.GOOGLE_SHEETS_ID }}",
+        "range": "WA Support Log!A:F",
+        "dataMode": "autoMapInputData"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook - WA Trigger": { "main": [[{ "node": "IF - Is Text Message" }]] },
+    "IF - Is Text Message": {
+      "main": [
+        [{ "node": "Set Variables" }],
+        []
+      ]
+    },
+    "Set Variables": { "main": [[{ "node": "HTTP - Claude API" }]] },
+    "HTTP - Claude API": { "main": [[{ "node": "IF - Escalate?" }]] },
+    "IF - Escalate?": {
+      "main": [
+        [{ "node": "HTTP - Slack Alert" }],
+        [{ "node": "HTTP - Reply WhatsApp" }]
+      ]
+    },
+    "HTTP - Reply WhatsApp": { "main": [[{ "node": "Google Sheets - Log" }]] },
+    "HTTP - Slack Alert": { "main": [[{ "node": "Google Sheets - Log" }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}
